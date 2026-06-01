@@ -431,7 +431,11 @@ def _demucs_environment() -> dict[str, str]:
     env.setdefault("TORCH_HOME", str(cache_root / "torch"))
     env["PYTHONUTF8"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
-    env["TQDM_ASCII"] = "1"
+    # Keep tqdm fully disabled for Demucs subprocess downloads.
+    # Some tqdm releases treat TQDM_ASCII="1" as a one-char custom charset,
+    # which can crash with ZeroDivisionError while formatting the progress bar.
+    env["TQDM_DISABLE"] = "1"
+    env.pop("TQDM_ASCII", None)
     Path(env["TORCH_HOME"]).mkdir(parents=True, exist_ok=True)
     return env
 
