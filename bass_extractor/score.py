@@ -416,6 +416,12 @@ def write_pdf_score(
     mode: str,
     options: ScoreOptions,
 ) -> None:
+    try:
+        _write_matplotlib_pdf(output_path, note_events, chords, bpm, key_name, key_fifths, mode, options)
+        return
+    except Exception:
+        pass
+
     del key_fifths, mode
     output_path.parent.mkdir(parents=True, exist_ok=True)
     page_width = 595.0
@@ -483,9 +489,188 @@ def write_pdf_score(
                 _draw_ledger_lines(commands, x, y, staff_bottom, line_gap)
                 _pdf_ellipse(commands, x, y, 4.8, 3.4, fill=True)
                 _pdf_line(commands, x + 4.5, y, x + 4.5, y + 23.0, 0.8)
-                _pdf_text(commands, x - 8.0, y - 15.0, _midi_label(event.midi), 6, "F1")
 
     _write_pdf(output_path, pages, page_width, page_height)
+
+
+def _write_matplotlib_pdf(
+    output_path: Path,
+    note_events: list[NoteEvent],
+    chords: list[ChordEvent],
+    bpm: float,
+    key_name: str,
+    key_fifths: int,
+    mode: str,
+    options: ScoreOptions,
+) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.patches import Ellipse
+
+    del mode
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    page_width = 595.0
+    page_height = 842.0
+    margin = 46.0
+    staff_left = 86.0
+    staff_right = page_width - margin
+    staff_width = staff_right - staff_left
+    measures_per_system = 4
+    systems_per_page = 5
+    system_gap = 126.0
+    line_gap = 8.5
+    measure_length = options.beats_per_measure * options.divisions_per_quarter
+    measure_count = _measure_count(note_events, options)
+    system_count = max(1, math.ceil(measure_count / measures_per_system))
+    page_count = max(1, math.ceil(system_count / systems_per_page))
+    chord_by_measure = {chord.measure: chord for chord in chords}
+
+    with PdfPages(output_path) as pdf:
+        for page_index in range(page_count):
+            figure, axis = plt.subplots(figsize=(8.27, 11.69))
+            axis.set_xlim(0, page_width)
+            axis.set_ylim(0, page_height)
+            axis.axis("off")
+
+            axis.text(margin, page_height - 43, options.title or output_path.stem, fontsize=18, fontweight="bold")
+            axis.text(
+                margin,
+                page_height - 64,
+                f"Bass score | BPM {bpm:.1f} | Key {key_name} | Chords inferred from bass",
+                fontsize=9,
+            )
+            if page_count > 1:
+                axis.text(page_width - 92, 26, f"Page {page_index + 1}/{page_count}", fontsize=8)
+
+            for system_in_page in range(systems_per_page):
+                system_index = page_index * systems_per_page + system_in_page
+                if system_index >= system_count:
+                    break
+                staff_bottom = page_height - 150.0 - system_in_page * system_gap
+                measure_width = staff_width / measures_per_system
+                first_measure = system_index * measures_per_system + 1
+                last_measure = min(measure_count, first_measure + measures_per_system - 1)
+                active_width = measure_width * (last_measure - first_measure + 1)
+
+                _mpl_draw_staff(axis, staff_left, staff_left + active_width, staff_bottom, line_gap)
+                _mpl_draw_bass_clef(axis, staff_left - 44, staff_bottom, line_gap)
+                signature_x = staff_left - 10
+                signature_x += _mpl_draw_key_signature(axis, signature_x, staff_bottom, line_gap, key_fifths)
+                _mpl_draw_time_signature(axis, signature_x + 8, staff_bottom, line_gap, options)
+
+                for measure_number in range(first_measure, last_measure + 1):
+                    slot = measure_number - first_measure
+                    measure_left = staff_left + slot * measure_width
+                    measure_right = measure_left + measure_width
+                    axis.plot([measure_left, measure_left], [staff_bottom, staff_bottom + line_gap * 4], color="black", lw=0.9)
+                    axis.plot([measure_right, measure_right], [staff_bottom, staff_bottom + line_gap * 4], color="black", lw=0.9)
+                    axis.text(measure_left + 2, staff_bottom - 15, str(measure_number), fontsize=7, color="#555555")
+
+                    chord = chord_by_measure.get(measure_number)
+                    if chord is not None:
+                        axis.text(measure_left + 12, staff_bottom + line_gap * 5.4, chord.symbol, fontsize=11, fontweight="bold")
+
+                    measure_start = (measure_number - 1) * measure_length
+                    for event in _events_overlapping_measure(note_events, measure_start, measure_length):
+                        _mpl_draw_event(
+                            axis,
+                            event,
+                            measure_left,
+                            measure_width,
+                            measure_start,
+                            measure_length,
+                            staff_bottom,
+                            line_gap,
+                            Ellipse,
+                        )
+
+            figure.tight_layout(pad=0)
+            pdf.savefig(figure)
+            plt.close(figure)
+
+
+def _mpl_draw_staff(axis: Any, left: float, right: float, bottom: float, line_gap: float) -> None:
+    for index in range(5):
+        y = bottom + index * line_gap
+        axis.plot([left, right], [y, y], color="black", lw=0.75)
+
+
+def _mpl_draw_bass_clef(axis: Any, x: float, staff_bottom: float, line_gap: float) -> None:
+    center_x = x + 22.0
+    center_y = staff_bottom + line_gap * 3.0
+    theta = np.linspace(-0.25 * np.pi, 1.25 * np.pi, 90)
+    radius_x = np.linspace(18.0, 4.0, theta.size)
+    radius_y = np.linspace(24.0, 6.0, theta.size)
+    xs = center_x + radius_x * np.cos(theta)
+    ys = center_y - radius_y * np.sin(theta)
+    axis.plot(xs, ys, color="black", lw=2.1, solid_capstyle="round")
+    axis.add_patch(Ellipse((center_x - 2.0, center_y + 0.5), width=7.6, height=7.6, facecolor="black", edgecolor="black"))
+    axis.add_patch(Ellipse((x + 47.0, staff_bottom + line_gap * 2.55), width=3.4, height=3.4, facecolor="black", edgecolor="black"))
+    axis.add_patch(Ellipse((x + 47.0, staff_bottom + line_gap * 1.55), width=3.4, height=3.4, facecolor="black", edgecolor="black"))
+    axis.plot([x + 58, x + 58], [staff_bottom, staff_bottom + line_gap * 4], color="black", lw=0.7)
+
+
+def _mpl_draw_time_signature(axis: Any, x: float, staff_bottom: float, line_gap: float, options: ScoreOptions) -> None:
+    axis.text(x, staff_bottom + line_gap * 2.35, str(options.beats_per_measure), fontsize=15, fontweight="bold")
+    axis.text(x, staff_bottom + line_gap * 0.65, str(options.beat_unit), fontsize=15, fontweight="bold")
+
+
+def _mpl_draw_key_signature(axis: Any, x: float, staff_bottom: float, line_gap: float, key_fifths: int) -> float:
+    if key_fifths == 0:
+        return 0.0
+    sharp_midis = [54, 49, 56, 51, 46, 53, 48]
+    flat_midis = [47, 52, 45, 50, 43, 48, 41]
+    symbol = "#" if key_fifths > 0 else "b"
+    midis = sharp_midis if key_fifths > 0 else flat_midis
+    count = min(7, abs(key_fifths))
+    for index in range(count):
+        y = _midi_to_bass_staff_y(midis[index], staff_bottom, line_gap) - 5
+        axis.text(x + index * 8.5, y, symbol, fontsize=13, fontweight="bold")
+    return count * 8.5 + 4.0
+
+
+def _mpl_draw_event(
+    axis: Any,
+    event: NoteEvent,
+    measure_left: float,
+    measure_width: float,
+    measure_start: int,
+    measure_length: int,
+    staff_bottom: float,
+    line_gap: float,
+    ellipse_class: Any,
+) -> None:
+    if event.midi is None:
+        return
+    event_offset = max(0, event.start_division - measure_start)
+    x = measure_left + 17.0 + (event_offset / measure_length) * max(20.0, measure_width - 34.0)
+    y = _midi_to_bass_staff_y(event.midi, staff_bottom, line_gap)
+    _mpl_draw_ledger_lines(axis, x, y, staff_bottom, line_gap)
+    duration = max(1, event.duration_divisions)
+    filled = duration < 8
+    note = ellipse_class((x, y), width=10.5, height=7.1, angle=-18, facecolor="black" if filled else "white", edgecolor="black", lw=1.0)
+    axis.add_patch(note)
+    if duration < 16:
+        axis.plot([x + 4.7, x + 4.7], [y, y + 27], color="black", lw=0.9)
+        if duration <= 2:
+            axis.plot([x + 4.7, x + 14.0], [y + 27, y + 22], color="black", lw=0.9)
+
+
+def _mpl_draw_ledger_lines(axis: Any, x: float, y: float, staff_bottom: float, line_gap: float) -> None:
+    staff_top = staff_bottom + line_gap * 4.0
+    if y < staff_bottom:
+        ledger = staff_bottom - line_gap
+        while ledger >= y - 1.0:
+            axis.plot([x - 9, x + 9], [ledger, ledger], color="black", lw=0.65)
+            ledger -= line_gap
+    elif y > staff_top:
+        ledger = staff_top + line_gap
+        while ledger <= y + 1.0:
+            axis.plot([x - 9, x + 9], [ledger, ledger], color="black", lw=0.65)
+            ledger += line_gap
 
 
 @dataclass(frozen=True)

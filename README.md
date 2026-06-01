@@ -54,7 +54,7 @@ cd "C:\Users\ck\Documents\New project\bass-extractor"
 .\run-cli.ps1 "C:\music\song.wav" -OutputPath "C:\music\song_bass.wav" -Profile studio -Format wav -KickClean -Score -ScoreTempo 120 -ScoreKey "A minor"
 ```
 
-会同时生成 `*.musicxml` 和 `*.pdf`。PDF 可直接打印；MusicXML 可以用 MuseScore、Logic、Dorico、Finale 等软件继续编辑。BPM 和调号会写入谱面；和弦来自 bass 音符和调性推断，不等于完整和声听写。
+会同时生成 `*.musicxml` 和 `*.pdf`。PDF 是 A4 打印版，会渲染低音谱表、拍号、调号、和弦和音符；MusicXML 可以用 MuseScore、Logic、Dorico、Finale 等软件继续编辑。BPM 和调号会写入谱面；和弦来自 bass 音符和调性推断，不等于完整和声听写。
 
 指定 PDF 输出路径：
 
