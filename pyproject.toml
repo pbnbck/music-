@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bass-extractor"
+version = "0.1.0"
+description = "Production-oriented bass stem extraction tool powered by Demucs."
+requires-python = ">=3.10"
+dependencies = [
+  "demucs==4.0.1",
+  "numpy>=1.23,<2",
+  "scipy>=1.9",
+  "soundfile>=0.12",
+  "torch==1.13.1",
+  "torchaudio==0.13.1",
+]
+
+[project.scripts]
+bass-extractor = "bass_extractor.cli:main"

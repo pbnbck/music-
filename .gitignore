@@ -1,0 +1,12 @@
+.venv/
+.venv-system/
+.model-cache/
+.pip-cache/
+__pycache__/
+*.pyc
+bass-extractor-output/
+dist/
+build/
+*.spec
+*.quality.json
+_demucs_work/
