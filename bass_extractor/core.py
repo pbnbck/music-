@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 ProgressCallback = Callable[[str], None]
+_PROGRESS_PATTERN = re.compile(r"(?P<percent>\d{1,3})%\|")
 
 
 class BassExtractorError(RuntimeError):
@@ -325,6 +327,7 @@ def build_demucs_command(
 
 
 def _run_command(command: list[str], progress: ProgressCallback | None, env: dict[str, str]) -> None:
+    last_progress: str | None = None
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -337,7 +340,12 @@ def _run_command(command: list[str], progress: ProgressCallback | None, env: dic
     )
     assert process.stdout is not None
     for line in process.stdout:
-        _emit(progress, line.rstrip())
+        for message in _clean_process_output(line):
+            if message.startswith("Demucs progress:"):
+                if message == last_progress:
+                    continue
+                last_progress = message
+            _emit(progress, message)
     return_code = process.wait()
     if return_code != 0:
         raise SeparationError(f"Demucs failed with exit code {return_code}.")
@@ -360,6 +368,9 @@ def _demucs_environment() -> dict[str, str]:
     cache_root = Path.cwd() / ".model-cache"
     env.setdefault("XDG_CACHE_HOME", str(cache_root))
     env.setdefault("TORCH_HOME", str(cache_root / "torch"))
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["TQDM_ASCII"] = "1"
     Path(env["TORCH_HOME"]).mkdir(parents=True, exist_ok=True)
     return env
 
@@ -420,6 +431,33 @@ def _torch_check() -> dict[str, Any]:
 def _emit(progress: ProgressCallback | None, message: str) -> None:
     if progress is not None:
         progress(message)
+
+
+def _clean_process_output(raw_line: str) -> list[str]:
+    messages: list[str] = []
+    for part in raw_line.replace("\r", "\n").splitlines():
+        text = part.strip()
+        if not text:
+            continue
+
+        progress_match = _PROGRESS_PATTERN.search(text)
+        if progress_match:
+            percent = min(100, int(progress_match.group("percent")))
+            messages.append(f"Demucs progress: {percent}%")
+            continue
+
+        if _is_progress_noise(text):
+            continue
+
+        messages.append(text.replace("\ufffd", "?"))
+    return messages
+
+
+def _is_progress_noise(text: str) -> bool:
+    if "?" not in text:
+        return False
+    question_ratio = text.count("?") / max(len(text), 1)
+    return question_ratio > 0.25 and ("|" in text or "[" in text or "seconds" in text)
 
 
 def _quote_for_log(value: str) -> str:
