@@ -87,6 +87,8 @@ class SeparationOptions:
     kick_window_ms: float = 150.0
     make_score: bool = False
     score_path: Path | None = None
+    score_pdf: bool = True
+    score_pdf_path: Path | None = None
     score_tempo: float | None = None
     score_key: str | None = None
     score_title: str | None = None
@@ -125,6 +127,8 @@ class SeparationOptions:
             kick_window_ms=self.kick_window_ms,
             make_score=self.make_score,
             score_path=self.score_path,
+            score_pdf=self.score_pdf,
+            score_pdf_path=self.score_pdf_path,
             score_tempo=self.score_tempo,
             score_key=self.score_key,
             score_title=self.score_title,
@@ -152,6 +156,8 @@ class ResolvedOptions:
     kick_window_ms: float
     make_score: bool
     score_path: Path | None
+    score_pdf: bool
+    score_pdf_path: Path | None
     score_tempo: float | None
     score_key: str | None
     score_title: str | None
@@ -168,6 +174,7 @@ class SeparationResult:
     no_bass_path: Path | None = None
     kick_cleanup: dict[str, Any] | None = None
     score_path: Path | None = None
+    score_pdf_path: Path | None = None
     score: dict[str, Any] | None = None
 
 
@@ -262,6 +269,7 @@ def separate_bass(
 
     score: dict[str, Any] | None = None
     score_path: Path | None = None
+    score_pdf_path: Path | None = None
     if resolved.make_score:
         from .score import ScoreOptions, create_bass_score
 
@@ -274,15 +282,20 @@ def separate_bass(
                 tempo_override=resolved.score_tempo,
                 key_override=resolved.score_key,
                 title=resolved.score_title or output_path.stem,
+                make_pdf=resolved.score_pdf,
+                pdf_path=resolved.score_pdf_path,
             ),
         )
         score = score_result.to_dict()
         score_path = score_result.score_path
+        score_pdf_path = score_result.pdf_path
         _emit(
             progress,
             f"Bass score written: {score_result.score_path} "
             f"({score_result.bpm:.1f} BPM, {score_result.key}, {len(score_result.chords)} chords)",
         )
+        if score_result.pdf_path is not None:
+            _emit(progress, f"Bass score PDF written: {score_result.pdf_path}")
 
     from .quality import build_quality_report
 
@@ -318,6 +331,7 @@ def separate_bass(
         no_bass_path=no_bass_output,
         kick_cleanup=kick_cleanup,
         score_path=score_path,
+        score_pdf_path=score_pdf_path,
         score=score,
     )
 

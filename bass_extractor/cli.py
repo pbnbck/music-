@@ -44,6 +44,8 @@ def main(argv: list[str] | None = None) -> int:
         kick_window_ms=args.kick_window_ms,
         make_score=args.score,
         score_path=Path(args.score_path) if args.score_path else None,
+        score_pdf=not args.no_score_pdf,
+        score_pdf_path=Path(args.score_pdf_path) if args.score_pdf_path else None,
         score_tempo=args.score_tempo,
         score_key=args.score_key,
         score_title=args.score_title,
@@ -65,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
         payload["kick_cleanup"] = result.kick_cleanup
     if result.score_path is not None:
         payload["score"] = str(result.score_path)
+    if result.score_pdf_path is not None:
+        payload["score_pdf"] = str(result.score_pdf_path)
     if result.score is not None:
         payload["score_analysis"] = result.score
     _safe_print(json.dumps(payload, ensure_ascii=False))
@@ -135,6 +139,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Create a bass staff MusicXML score after extraction.",
     )
     parser.add_argument("--score-path", help="MusicXML output path. Defaults to the bass output name with .musicxml.")
+    parser.add_argument("--score-pdf-path", help="PDF score output path. Defaults to the MusicXML name with .pdf.")
+    parser.add_argument("--no-score-pdf", action="store_true", help="Do not render the PDF score.")
     parser.add_argument("--score-tempo", type=float, help="Override detected BPM for the generated score.")
     parser.add_argument("--score-key", help="Override detected key, e.g. 'C major' or 'A minor'.")
     parser.add_argument("--score-title", help="Title written into the MusicXML score.")

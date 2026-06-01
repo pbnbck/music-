@@ -12,7 +12,7 @@
 - 支持 `studio`、`balanced`、`fast` 三档质量配置。
 - 可选导出 `no_bass` 版本。
 - 可选 kick-aware 清理：检测固定音高、重复节奏的 kick，在 bass stem 的对应瞬态窗口中压低 kick 泄漏。
-- 可选生成 bass 五线谱 MusicXML：自动估计 BPM、调号和按小节推断的和弦标记。
+- 可选生成 bass 五线谱 MusicXML 和 PDF：自动估计 BPM、调号和按小节推断的和弦标记。
 - 自动生成 `*.quality.json`，记录峰值、RMS、裁剪风险、低频能量比例、时长匹配等指标。
 
 ## 安装
@@ -48,13 +48,19 @@ cd "C:\Users\ck\Documents\New project\bass-extractor"
 .\run-cli.ps1 "C:\music\song.wav" -OutputPath "C:\music\song_bass.wav" -Profile studio -Format wav -KickClean -KickStrength 0.7
 ```
 
-同时生成 bass 五线谱：
+同时生成 bass 五线谱和 PDF：
 
 ```powershell
 .\run-cli.ps1 "C:\music\song.wav" -OutputPath "C:\music\song_bass.wav" -Profile studio -Format wav -KickClean -Score -ScoreTempo 120 -ScoreKey "A minor"
 ```
 
-生成的 `*.musicxml` 可以用 MuseScore、Logic、Dorico、Finale 等软件打开。BPM 和调号会写入谱面；和弦来自 bass 音符和调性推断，不等于完整和声听写。
+会同时生成 `*.musicxml` 和 `*.pdf`。PDF 可直接打印；MusicXML 可以用 MuseScore、Logic、Dorico、Finale 等软件继续编辑。BPM 和调号会写入谱面；和弦来自 bass 音符和调性推断，不等于完整和声听写。
+
+指定 PDF 输出路径：
+
+```powershell
+.\run-cli.ps1 "C:\music\song.wav" -OutputPath "C:\music\song_bass.wav" -Profile studio -Format wav -Score -ScorePdfPath "C:\music\song_bass_score.pdf"
+```
 
 也可以直接调用 Python：
 
@@ -72,6 +78,12 @@ Python CLI 生成谱面：
 
 ```powershell
 .\.venv\Scripts\python.exe -m bass_extractor.cli "C:\music\song.wav" -o "C:\music\song_bass.wav" --profile studio --kick-clean --score --score-tempo 120 --score-key "A minor"
+```
+
+Python CLI 指定 PDF 路径：
+
+```powershell
+.\.venv\Scripts\python.exe -m bass_extractor.cli "C:\music\song.wav" -o "C:\music\song_bass.wav" --profile studio --score --score-pdf-path "C:\music\song_bass_score.pdf"
 ```
 
 环境诊断：

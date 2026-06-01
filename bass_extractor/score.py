@@ -53,6 +53,8 @@ class ScoreOptions:
     key_override: str | None = None
     title: str | None = None
     minimum_note_ms: float = 80.0
+    make_pdf: bool = True
+    pdf_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -92,6 +94,7 @@ class ChordEvent:
 @dataclass(frozen=True)
 class ScoreResult:
     score_path: Path
+    pdf_path: Path | None
     bpm: float
     key: str
     key_fifths: int
@@ -104,6 +107,7 @@ class ScoreResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "score_path": str(self.score_path),
+            "pdf_path": str(self.pdf_path) if self.pdf_path is not None else None,
             "bpm": round(self.bpm, 3),
             "key": self.key,
             "key_fifths": self.key_fifths,
@@ -140,10 +144,14 @@ def create_bass_score(
         "Chords are inferred from bass notes and key context, not guaranteed full harmonic transcription."
     ]
     write_musicxml(destination, note_events, chords, bpm, key_name, key_fifths, mode, options)
+    pdf_path = options.pdf_path or destination.with_suffix(".pdf")
+    if options.make_pdf:
+        write_pdf_score(pdf_path, note_events, chords, bpm, key_name, key_fifths, mode, options)
 
     measure_count = _measure_count(note_events, options)
     return ScoreResult(
         score_path=destination,
+        pdf_path=pdf_path if options.make_pdf else None,
         bpm=bpm,
         key=key_name,
         key_fifths=key_fifths,
@@ -398,6 +406,88 @@ def write_musicxml(
     ET.ElementTree(score).write(output_path, encoding="utf-8", xml_declaration=True)
 
 
+def write_pdf_score(
+    output_path: Path,
+    note_events: list[NoteEvent],
+    chords: list[ChordEvent],
+    bpm: float,
+    key_name: str,
+    key_fifths: int,
+    mode: str,
+    options: ScoreOptions,
+) -> None:
+    del key_fifths, mode
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    page_width = 595.0
+    page_height = 842.0
+    margin = 50.0
+    staff_left = 82.0
+    staff_right = page_width - margin
+    staff_width = staff_right - staff_left
+    measures_per_system = 4
+    systems_per_page = 5
+    system_gap = 126.0
+    line_gap = 8.0
+    measure_length = options.beats_per_measure * options.divisions_per_quarter
+    measure_count = _measure_count(note_events, options)
+    system_count = max(1, math.ceil(measure_count / measures_per_system))
+    page_count = max(1, math.ceil(system_count / systems_per_page))
+    pieces = _events_to_measure_pieces(note_events, options)
+    chord_by_measure = {chord.measure: chord for chord in chords}
+
+    pages: list[list[str]] = [[] for _ in range(page_count)]
+    for page_index, commands in enumerate(pages):
+        _pdf_text(commands, margin, page_height - 45.0, options.title or output_path.stem, 18, "F2")
+        subtitle = f"Bass score | BPM {bpm:.1f} | Key {key_name} | Chords inferred from bass"
+        _pdf_text(commands, margin, page_height - 68.0, subtitle, 10, "F1")
+        if page_count > 1:
+            _pdf_text(commands, page_width - 95.0, 28.0, f"Page {page_index + 1}/{page_count}", 9, "F1")
+
+    for system_index in range(system_count):
+        page_index = system_index // systems_per_page
+        system_in_page = system_index % systems_per_page
+        commands = pages[page_index]
+        staff_bottom = page_height - 150.0 - system_in_page * system_gap
+        measure_width = staff_width / measures_per_system
+        first_measure = system_index * measures_per_system + 1
+        last_measure = min(measure_count, first_measure + measures_per_system - 1)
+        active_width = measure_width * (last_measure - first_measure + 1)
+
+        _draw_staff(commands, staff_left, staff_left + active_width, staff_bottom, line_gap)
+        _pdf_text(commands, staff_left - 50.0, staff_bottom + line_gap * 2.0 - 7.0, "F", 28, "F2")
+        _pdf_circle(commands, staff_left - 16.0, staff_bottom + line_gap * 2.5, 1.7, fill=True)
+        _pdf_circle(commands, staff_left - 16.0, staff_bottom + line_gap * 1.5, 1.7, fill=True)
+        _pdf_text(commands, staff_left - 50.0, staff_bottom - 18.0, "bass clef", 7, "F1")
+
+        for measure_number in range(first_measure, last_measure + 1):
+            slot = measure_number - first_measure
+            measure_left = staff_left + slot * measure_width
+            measure_right = measure_left + measure_width
+            _pdf_line(commands, measure_left, staff_bottom, measure_left, staff_bottom + line_gap * 4.0, 0.8)
+            _pdf_line(commands, measure_right, staff_bottom, measure_right, staff_bottom + line_gap * 4.0, 0.8)
+            _pdf_text(commands, measure_left + 3.0, staff_bottom - 15.0, str(measure_number), 7, "F1")
+
+            chord = chord_by_measure.get(measure_number)
+            if chord is not None:
+                _pdf_text(commands, measure_left + 10.0, staff_bottom + line_gap * 5.8, chord.symbol, 11, "F2")
+
+            measure_start = (measure_number - 1) * measure_length
+            for event in _events_overlapping_measure(note_events, measure_start, measure_length):
+                if event.midi is None:
+                    rest_x = measure_left + measure_width * 0.5
+                    _pdf_text(commands, rest_x - 4.0, staff_bottom + line_gap * 2.0 - 3.0, "rest", 7, "F1")
+                    continue
+                event_offset = max(0, event.start_division - measure_start)
+                x = measure_left + 16.0 + (event_offset / measure_length) * max(20.0, measure_width - 32.0)
+                y = _midi_to_bass_staff_y(event.midi, staff_bottom, line_gap)
+                _draw_ledger_lines(commands, x, y, staff_bottom, line_gap)
+                _pdf_ellipse(commands, x, y, 4.8, 3.4, fill=True)
+                _pdf_line(commands, x + 4.5, y, x + 4.5, y + 23.0, 0.8)
+                _pdf_text(commands, x - 8.0, y - 15.0, _midi_label(event.midi), 6, "F1")
+
+    _write_pdf(output_path, pages, page_width, page_height)
+
+
 @dataclass(frozen=True)
 class NotePiece:
     midi: int | None
@@ -470,6 +560,145 @@ def _add_note(measure: ET.Element, piece: NotePiece) -> None:
             ET.SubElement(notations, "tied", type="stop")
         if piece.tie_start:
             ET.SubElement(notations, "tied", type="start")
+
+
+def _events_overlapping_measure(
+    note_events: list[NoteEvent],
+    measure_start: int,
+    measure_length: int,
+) -> list[NoteEvent]:
+    measure_end = measure_start + measure_length
+    values: list[NoteEvent] = []
+    for event in note_events:
+        event_end = event.start_division + event.duration_divisions
+        if _overlap(measure_start, measure_end, event.start_division, event_end) > 0:
+            values.append(event)
+    return values
+
+
+def _draw_staff(commands: list[str], left: float, right: float, bottom: float, line_gap: float) -> None:
+    for index in range(5):
+        y = bottom + index * line_gap
+        _pdf_line(commands, left, y, right, y, 0.65)
+
+
+def _draw_ledger_lines(commands: list[str], x: float, y: float, staff_bottom: float, line_gap: float) -> None:
+    staff_top = staff_bottom + line_gap * 4.0
+    ledger_gap = line_gap
+    if y < staff_bottom:
+        ledger = staff_bottom - ledger_gap
+        while ledger >= y - 1.0:
+            _pdf_line(commands, x - 8.0, ledger, x + 8.0, ledger, 0.55)
+            ledger -= ledger_gap
+    elif y > staff_top:
+        ledger = staff_top + ledger_gap
+        while ledger <= y + 1.0:
+            _pdf_line(commands, x - 8.0, ledger, x + 8.0, ledger, 0.55)
+            ledger += ledger_gap
+
+
+def _midi_to_bass_staff_y(midi: int, staff_bottom: float, line_gap: float) -> float:
+    step, _, octave = _midi_to_pitch(midi)
+    letter_index = {"C": 0, "D": 1, "E": 2, "F": 3, "G": 4, "A": 5, "B": 6}[step]
+    diatonic = octave * 7 + letter_index
+    bass_bottom_line_g2 = 2 * 7 + 4
+    return staff_bottom + (diatonic - bass_bottom_line_g2) * (line_gap / 2.0)
+
+
+def _midi_label(midi: int) -> str:
+    step, alter, octave = _midi_to_pitch(midi)
+    accidental = "#" if alter == 1 else "b" if alter == -1 else ""
+    return f"{step}{accidental}{octave}"
+
+
+def _pdf_line(commands: list[str], x1: float, y1: float, x2: float, y2: float, width: float = 1.0) -> None:
+    commands.append(f"{width:.3f} w {x1:.3f} {y1:.3f} m {x2:.3f} {y2:.3f} l S")
+
+
+def _pdf_text(commands: list[str], x: float, y: float, text: str, size: int, font: str = "F1") -> None:
+    commands.append(f"BT /{font} {size} Tf {x:.3f} {y:.3f} Td ({_pdf_escape(text)}) Tj ET")
+
+
+def _pdf_circle(commands: list[str], x: float, y: float, radius: float, fill: bool = False) -> None:
+    _pdf_ellipse(commands, x, y, radius, radius, fill=fill)
+
+
+def _pdf_ellipse(commands: list[str], x: float, y: float, rx: float, ry: float, fill: bool = False) -> None:
+    kappa = 0.5522847498
+    op = "f" if fill else "S"
+    commands.append(
+        " ".join(
+            [
+                f"{x + rx:.3f} {y:.3f} m",
+                f"{x + rx:.3f} {y + ry * kappa:.3f} {x + rx * kappa:.3f} {y + ry:.3f} {x:.3f} {y + ry:.3f} c",
+                f"{x - rx * kappa:.3f} {y + ry:.3f} {x - rx:.3f} {y + ry * kappa:.3f} {x - rx:.3f} {y:.3f} c",
+                f"{x - rx:.3f} {y - ry * kappa:.3f} {x - rx * kappa:.3f} {y - ry:.3f} {x:.3f} {y - ry:.3f} c",
+                f"{x + rx * kappa:.3f} {y - ry:.3f} {x + rx:.3f} {y - ry * kappa:.3f} {x + rx:.3f} {y:.3f} c",
+                op,
+            ]
+        )
+    )
+
+
+def _pdf_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _write_pdf(output_path: Path, pages: list[list[str]], page_width: float, page_height: float) -> None:
+    objects: list[bytes] = []
+    page_count = len(pages)
+    catalog_id = 1
+    pages_id = 2
+    font_regular_id = 3
+    font_bold_id = 4
+    first_page_id = 5
+    content_ids: list[int] = []
+    page_ids: list[int] = []
+
+    objects.append(f"<< /Type /Catalog /Pages {pages_id} 0 R >>".encode("ascii"))
+    objects.append(b"")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>")
+
+    next_id = first_page_id
+    for page_commands in pages:
+        page_id = next_id
+        content_id = next_id + 1
+        next_id += 2
+        page_ids.append(page_id)
+        content_ids.append(content_id)
+        objects.append(
+            (
+                f"<< /Type /Page /Parent {pages_id} 0 R /MediaBox [0 0 {page_width:.0f} {page_height:.0f}] "
+                f"/Resources << /Font << /F1 {font_regular_id} 0 R /F2 {font_bold_id} 0 R >> >> "
+                f"/Contents {content_id} 0 R >>"
+            ).encode("ascii")
+        )
+        stream = "\n".join(page_commands).encode("latin-1", errors="replace")
+        objects.append(b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream")
+
+    kids = " ".join(f"{page_id} 0 R" for page_id in page_ids)
+    objects[pages_id - 1] = f"<< /Type /Pages /Kids [{kids}] /Count {page_count} >>".encode("ascii")
+
+    output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for object_id, payload in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output.extend(f"{object_id} 0 obj\n".encode("ascii"))
+        output.extend(payload)
+        output.extend(b"\nendobj\n")
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.extend(
+        (
+            f"trailer\n<< /Size {len(objects) + 1} /Root {catalog_id} 0 R >>\n"
+            f"startxref\n{xref_offset}\n%%EOF\n"
+        ).encode("ascii")
+    )
+    output_path.write_bytes(bytes(output))
 
 
 def _read_audio(path: Path) -> tuple[int, np.ndarray]:

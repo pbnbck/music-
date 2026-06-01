@@ -15,20 +15,24 @@ class ScoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bass_path = Path(tmp) / "bass.wav"
             score_path = Path(tmp) / "bass.musicxml"
+            pdf_path = Path(tmp) / "bass.pdf"
             sample_rate, audio = _bass_line()
             wavfile.write(bass_path, sample_rate, audio)
 
             result = create_bass_score(
                 bass_path,
                 score_path,
-                ScoreOptions(tempo_override=120.0, key_override="C major", title="Bass Test"),
+                ScoreOptions(tempo_override=120.0, key_override="C major", title="Bass Test", pdf_path=pdf_path),
             )
             xml = score_path.read_text(encoding="utf-8")
+            pdf_header = pdf_path.read_bytes()[:8]
 
         self.assertEqual(result.bpm, 120.0)
         self.assertEqual(result.key, "C major")
+        self.assertEqual(result.pdf_path, pdf_path)
         self.assertGreater(result.note_count, 0)
         self.assertGreater(len(result.chords), 0)
+        self.assertEqual(pdf_header[:5], b"%PDF-")
         self.assertIn("<work-title>Bass Test</work-title>", xml)
         self.assertIn("<per-minute>120</per-minute>", xml)
         self.assertIn("<fifths>0</fifths>", xml)

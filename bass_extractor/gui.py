@@ -192,6 +192,8 @@ class BassExtractorApp(tk.Tk):
             self._messages.put(f"DONE bass: {result.bass_path}")
             if result.score_path is not None:
                 self._messages.put(f"DONE score: {result.score_path}")
+            if result.score_pdf_path is not None:
+                self._messages.put(f"DONE score PDF: {result.score_pdf_path}")
             self._messages.put(f"DONE report: {result.report_path}")
         except Exception as exc:
             self._messages.put(f"ERROR: {exc}")

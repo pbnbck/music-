@@ -18,6 +18,8 @@ param(
 
   [switch]$Score,
   [string]$ScorePath = "",
+  [string]$ScorePdfPath = "",
+  [switch]$NoScorePdf,
   [double]$ScoreTempo = 0,
   [string]$ScoreKey = "",
   [string]$ScoreTitle = ""
@@ -50,6 +52,12 @@ if ($Score) {
   $ArgsList += @("--score")
   if ($ScorePath) {
     $ArgsList += @("--score-path", $ScorePath)
+  }
+  if ($ScorePdfPath) {
+    $ArgsList += @("--score-pdf-path", $ScorePdfPath)
+  }
+  if ($NoScorePdf) {
+    $ArgsList += @("--no-score-pdf")
   }
   if ($ScoreTempo -gt 0) {
     $ArgsList += @("--score-tempo", "$ScoreTempo")
