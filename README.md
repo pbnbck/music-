@@ -12,6 +12,7 @@
 - 支持 `studio`、`balanced`、`fast` 三档质量配置。
 - 可选导出 `no_bass` 版本。
 - 可选 kick-aware 清理：检测固定音高、重复节奏的 kick，在 bass stem 的对应瞬态窗口中压低 kick 泄漏。
+- 可选生成 bass 五线谱 MusicXML：自动估计 BPM、调号和按小节推断的和弦标记。
 - 自动生成 `*.quality.json`，记录峰值、RMS、裁剪风险、低频能量比例、时长匹配等指标。
 
 ## 安装
@@ -47,6 +48,14 @@ cd "C:\Users\ck\Documents\New project\bass-extractor"
 .\run-cli.ps1 "C:\music\song.wav" -OutputPath "C:\music\song_bass.wav" -Profile studio -Format wav -KickClean -KickStrength 0.7
 ```
 
+同时生成 bass 五线谱：
+
+```powershell
+.\run-cli.ps1 "C:\music\song.wav" -OutputPath "C:\music\song_bass.wav" -Profile studio -Format wav -KickClean -Score -ScoreTempo 120 -ScoreKey "A minor"
+```
+
+生成的 `*.musicxml` 可以用 MuseScore、Logic、Dorico、Finale 等软件打开。BPM 和调号会写入谱面；和弦来自 bass 音符和调性推断，不等于完整和声听写。
+
 也可以直接调用 Python：
 
 ```powershell
@@ -57,6 +66,12 @@ Python CLI 对应参数：
 
 ```powershell
 .\.venv\Scripts\python.exe -m bass_extractor.cli "C:\music\song.wav" -o "C:\music\song_bass.wav" --profile studio --kick-clean --kick-strength 0.7
+```
+
+Python CLI 生成谱面：
+
+```powershell
+.\.venv\Scripts\python.exe -m bass_extractor.cli "C:\music\song.wav" -o "C:\music\song_bass.wav" --profile studio --kick-clean --score --score-tempo 120 --score-key "A minor"
 ```
 
 环境诊断：
@@ -78,6 +93,7 @@ Python CLI 对应参数：
 - 对每首歌保留 `*.quality.json`。
 - 对低频复杂、bass 与 kick 重叠严重的歌曲，必须人工听检。
 - kick-aware 清理适合固定音高 kick；如果 kick 有长 808 尾音、滑音或和 bass 同音高同节奏，强度不要过高。
+- 只靠 bass 音频无法唯一确定完整和弦，谱面里的和弦是基于 bass 根音和调号的推断，正式出版前需要人工校对。
 - 如果要批量处理正式曲库，建议使用 CUDA GPU，并统一记录模型名、profile、日期和操作员。
 
 ## 打包成 exe

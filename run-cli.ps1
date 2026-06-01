@@ -14,7 +14,13 @@ param(
   [double]$KickStrength = 0.65,
   [double]$KickMinFrequency = 35.0,
   [double]$KickMaxFrequency = 135.0,
-  [double]$KickWindowMs = 150.0
+  [double]$KickWindowMs = 150.0,
+
+  [switch]$Score,
+  [string]$ScorePath = "",
+  [double]$ScoreTempo = 0,
+  [string]$ScoreKey = "",
+  [string]$ScoreTitle = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +45,21 @@ if ($KickClean) {
     "--kick-max-frequency", "$KickMaxFrequency",
     "--kick-window-ms", "$KickWindowMs"
   )
+}
+if ($Score) {
+  $ArgsList += @("--score")
+  if ($ScorePath) {
+    $ArgsList += @("--score-path", $ScorePath)
+  }
+  if ($ScoreTempo -gt 0) {
+    $ArgsList += @("--score-tempo", "$ScoreTempo")
+  }
+  if ($ScoreKey) {
+    $ArgsList += @("--score-key", $ScoreKey)
+  }
+  if ($ScoreTitle) {
+    $ArgsList += @("--score-title", $ScoreTitle)
+  }
 }
 
 Push-Location $Root

@@ -31,6 +31,10 @@ class CoreTests(unittest.TestCase):
         self.assertIn("bass", command)
         self.assertIn("--float32", command)
 
+    def test_score_rejects_mp3_output(self) -> None:
+        with self.assertRaises(ValueError):
+            SeparationOptions(profile="fast", output_format="mp3", make_score=True).resolved()
+
 
 class QualityTests(unittest.TestCase):
     def test_bass_sine_scores_as_bass_dominant(self) -> None:

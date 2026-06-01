@@ -42,6 +42,11 @@ def main(argv: list[str] | None = None) -> int:
         kick_min_frequency=args.kick_min_frequency,
         kick_max_frequency=args.kick_max_frequency,
         kick_window_ms=args.kick_window_ms,
+        make_score=args.score,
+        score_path=Path(args.score_path) if args.score_path else None,
+        score_tempo=args.score_tempo,
+        score_key=args.score_key,
+        score_title=args.score_title,
     )
 
     try:
@@ -58,6 +63,10 @@ def main(argv: list[str] | None = None) -> int:
     payload = {"bass": str(result.bass_path), "report": str(result.report_path)}
     if result.kick_cleanup is not None:
         payload["kick_cleanup"] = result.kick_cleanup
+    if result.score_path is not None:
+        payload["score"] = str(result.score_path)
+    if result.score is not None:
+        payload["score_analysis"] = result.score
     _safe_print(json.dumps(payload, ensure_ascii=False))
     return 0
 
@@ -120,6 +129,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kick-min-frequency", type=float, default=35.0, help="Lowest expected kick pitch in Hz.")
     parser.add_argument("--kick-max-frequency", type=float, default=135.0, help="Highest expected kick pitch in Hz.")
     parser.add_argument("--kick-window-ms", type=float, default=150.0, help="Milliseconds to attenuate after each kick.")
+    parser.add_argument(
+        "--score",
+        action="store_true",
+        help="Create a bass staff MusicXML score after extraction.",
+    )
+    parser.add_argument("--score-path", help="MusicXML output path. Defaults to the bass output name with .musicxml.")
+    parser.add_argument("--score-tempo", type=float, help="Override detected BPM for the generated score.")
+    parser.add_argument("--score-key", help="Override detected key, e.g. 'C major' or 'A minor'.")
+    parser.add_argument("--score-title", help="Title written into the MusicXML score.")
     return parser
 
 

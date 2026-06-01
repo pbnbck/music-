@@ -85,6 +85,11 @@ class SeparationOptions:
     kick_min_frequency: float = 35.0
     kick_max_frequency: float = 135.0
     kick_window_ms: float = 150.0
+    make_score: bool = False
+    score_path: Path | None = None
+    score_tempo: float | None = None
+    score_key: str | None = None
+    score_title: str | None = None
 
     def resolved(self) -> "ResolvedOptions":
         profile = PROFILES.get(self.profile)
@@ -96,6 +101,8 @@ class SeparationOptions:
             raise ValueError("output_format must be wav, flac, or mp3")
         if self.kick_clean and output_format == "mp3":
             raise ValueError("kick_clean requires wav or flac output; use wav for final delivery")
+        if self.make_score and output_format == "mp3":
+            raise ValueError("score generation requires wav or flac output; use wav for final delivery")
         if not 0.0 <= self.kick_strength <= 0.95:
             raise ValueError("kick_strength must be between 0.0 and 0.95")
         return ResolvedOptions(
@@ -116,6 +123,11 @@ class SeparationOptions:
             kick_min_frequency=self.kick_min_frequency,
             kick_max_frequency=self.kick_max_frequency,
             kick_window_ms=self.kick_window_ms,
+            make_score=self.make_score,
+            score_path=self.score_path,
+            score_tempo=self.score_tempo,
+            score_key=self.score_key,
+            score_title=self.score_title,
         )
 
 
@@ -138,6 +150,11 @@ class ResolvedOptions:
     kick_min_frequency: float
     kick_max_frequency: float
     kick_window_ms: float
+    make_score: bool
+    score_path: Path | None
+    score_tempo: float | None
+    score_key: str | None
+    score_title: str | None
 
 
 @dataclass(frozen=True)
@@ -150,6 +167,8 @@ class SeparationResult:
     command: list[str]
     no_bass_path: Path | None = None
     kick_cleanup: dict[str, Any] | None = None
+    score_path: Path | None = None
+    score: dict[str, Any] | None = None
 
 
 def diagnose_environment(python_executable: str = sys.executable) -> list[dict[str, Any]]:
@@ -241,6 +260,30 @@ def separate_bass(
                 f"Kick cleanup: {cleanup_result.events_detected} events at about {frequency:.1f} Hz",
             )
 
+    score: dict[str, Any] | None = None
+    score_path: Path | None = None
+    if resolved.make_score:
+        from .score import ScoreOptions, create_bass_score
+
+        _emit(progress, "Generating bass MusicXML score...")
+        score_path = resolved.score_path or output_path.with_suffix(".musicxml")
+        score_result = create_bass_score(
+            bass_path=output_path,
+            output_path=score_path,
+            options=ScoreOptions(
+                tempo_override=resolved.score_tempo,
+                key_override=resolved.score_key,
+                title=resolved.score_title or output_path.stem,
+            ),
+        )
+        score = score_result.to_dict()
+        score_path = score_result.score_path
+        _emit(
+            progress,
+            f"Bass score written: {score_result.score_path} "
+            f"({score_result.bpm:.1f} BPM, {score_result.key}, {len(score_result.chords)} chords)",
+        )
+
     from .quality import build_quality_report
 
     report = build_quality_report(input_path, output_path)
@@ -255,6 +298,8 @@ def separate_bass(
     }
     if kick_cleanup is not None:
         report["kick_cleanup"] = kick_cleanup
+    if score is not None:
+        report["score"] = score
     report_path = output_path.with_suffix(output_path.suffix + ".quality.json")
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -272,6 +317,8 @@ def separate_bass(
         command=command,
         no_bass_path=no_bass_output,
         kick_cleanup=kick_cleanup,
+        score_path=score_path,
+        score=score,
     )
 
 

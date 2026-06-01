@@ -62,6 +62,7 @@ class BassExtractorApp(tk.Tk):
         self.keep_work_var = tk.BooleanVar(value=False)
         self.kick_clean_var = tk.BooleanVar(value=False)
         self.kick_strength_var = tk.DoubleVar(value=0.65)
+        self.score_var = tk.BooleanVar(value=False)
 
         ttk.Label(settings, text="Quality").grid(row=0, column=0, sticky="w")
         ttk.Combobox(
@@ -107,6 +108,9 @@ class BassExtractorApp(tk.Tk):
             to=0.9,
             orient="horizontal",
         ).grid(row=2, column=2, columnspan=3, sticky="ew", pady=(12, 0), padx=(10, 10))
+        ttk.Checkbutton(settings, text="Make score", variable=self.score_var).grid(
+            row=2, column=5, sticky="w", pady=(12, 0), padx=(0, 10)
+        )
 
         self.start_button = ttk.Button(settings, text="Extract Bass", command=self._start)
         self.start_button.grid(row=1, column=7, sticky="e")
@@ -177,6 +181,7 @@ class BassExtractorApp(tk.Tk):
                 export_no_bass=self.no_bass_var.get(),
                 kick_clean=self.kick_clean_var.get(),
                 kick_strength=float(self.kick_strength_var.get()),
+                make_score=self.score_var.get(),
             )
             result = separate_bass(
                 Path(self.input_var.get()),
@@ -185,6 +190,8 @@ class BassExtractorApp(tk.Tk):
                 progress=self._messages.put,
             )
             self._messages.put(f"DONE bass: {result.bass_path}")
+            if result.score_path is not None:
+                self._messages.put(f"DONE score: {result.score_path}")
             self._messages.put(f"DONE report: {result.report_path}")
         except Exception as exc:
             self._messages.put(f"ERROR: {exc}")

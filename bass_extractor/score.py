@@ -1,0 +1,691 @@
+from __future__ import annotations
+
+import math
+import warnings
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+from scipy import signal
+from scipy.io import wavfile
+
+try:
+    from scipy.io.wavfile import WavFileWarning
+except ImportError:  # pragma: no cover - compatibility with older scipy
+    WavFileWarning = Warning
+
+
+NOTE_NAMES_SHARP = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
+MAJOR_PROFILE = np.asarray([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+MINOR_PROFILE = np.asarray([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+KEY_FIFTHS = {
+    "C": 0,
+    "G": 1,
+    "D": 2,
+    "A": 3,
+    "E": 4,
+    "B": 5,
+    "F#": 6,
+    "C#": 7,
+    "F": -1,
+    "Bb": -2,
+    "Eb": -3,
+    "Ab": -4,
+    "Db": -5,
+    "Gb": -6,
+    "Cb": -7,
+}
+PC_TO_FLAT_NAME = ("C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B")
+MAJOR_QUALITIES = {0: "major", 2: "minor", 4: "minor", 5: "major", 7: "major", 9: "minor", 11: "diminished"}
+MINOR_QUALITIES = {0: "minor", 2: "diminished", 3: "major", 5: "minor", 7: "minor", 8: "major", 10: "major"}
+
+
+@dataclass(frozen=True)
+class ScoreOptions:
+    divisions_per_quarter: int = 4
+    beats_per_measure: int = 4
+    beat_unit: int = 4
+    min_frequency: float = 35.0
+    max_frequency: float = 320.0
+    tempo_override: float | None = None
+    key_override: str | None = None
+    title: str | None = None
+    minimum_note_ms: float = 80.0
+
+
+@dataclass(frozen=True)
+class NoteEvent:
+    midi: int | None
+    start_division: int
+    duration_divisions: int
+
+
+@dataclass(frozen=True)
+class ChordEvent:
+    measure: int
+    root: str
+    quality: str
+    bass_midi: int
+
+    @property
+    def symbol(self) -> str:
+        if self.quality == "major":
+            return self.root
+        if self.quality == "minor":
+            return f"{self.root}m"
+        if self.quality == "diminished":
+            return f"{self.root}dim"
+        return self.root
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "measure": self.measure,
+            "root": self.root,
+            "quality": self.quality,
+            "symbol": self.symbol,
+            "bass_midi": self.bass_midi,
+        }
+
+
+@dataclass(frozen=True)
+class ScoreResult:
+    score_path: Path
+    bpm: float
+    key: str
+    key_fifths: int
+    mode: str
+    note_count: int
+    measure_count: int
+    chords: list[ChordEvent]
+    warnings: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "score_path": str(self.score_path),
+            "bpm": round(self.bpm, 3),
+            "key": self.key,
+            "key_fifths": self.key_fifths,
+            "mode": self.mode,
+            "note_count": self.note_count,
+            "measure_count": self.measure_count,
+            "chords": [chord.to_dict() for chord in self.chords],
+            "warnings": self.warnings,
+        }
+
+
+def create_bass_score(
+    bass_path: Path,
+    output_path: Path | None = None,
+    options: ScoreOptions | None = None,
+) -> ScoreResult:
+    options = options or ScoreOptions()
+    _validate_options(options)
+
+    sample_rate, audio = _read_audio(bass_path)
+    mono = _to_mono(audio)
+    bpm = float(options.tempo_override or estimate_bpm(mono, sample_rate))
+    key_name, key_fifths, mode = estimate_key(mono, sample_rate, options)
+    if options.key_override:
+        key_name, key_fifths, mode = _parse_key_override(options.key_override)
+
+    frame_pitches, frame_times, frame_energies = track_bass_pitch(mono, sample_rate, options)
+    note_events = frame_pitches_to_events(frame_pitches, frame_times, frame_energies, bpm, options)
+    chords = infer_chords(note_events, key_name, mode, options)
+
+    destination = output_path or bass_path.with_suffix(".musicxml")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    warnings_list = [
+        "Chords are inferred from bass notes and key context, not guaranteed full harmonic transcription."
+    ]
+    write_musicxml(destination, note_events, chords, bpm, key_name, key_fifths, mode, options)
+
+    measure_count = _measure_count(note_events, options)
+    return ScoreResult(
+        score_path=destination,
+        bpm=bpm,
+        key=key_name,
+        key_fifths=key_fifths,
+        mode=mode,
+        note_count=sum(1 for event in note_events if event.midi is not None),
+        measure_count=measure_count,
+        chords=chords,
+        warnings=warnings_list,
+    )
+
+
+def estimate_bpm(mono_audio: np.ndarray, sample_rate: int) -> float:
+    if mono_audio.size < sample_rate:
+        return 120.0
+
+    hop = max(1, int(sample_rate * 0.020))
+    frame = max(hop * 2, int(sample_rate * 0.060))
+    envelope = _frame_rms(_band_limit(mono_audio, sample_rate, 35.0, 420.0), frame, hop)
+    onset = np.maximum(np.diff(np.log1p(envelope * 1000.0), prepend=0.0), 0.0)
+    onset = onset - float(np.mean(onset))
+    if not np.any(onset > 0):
+        return 120.0
+
+    autocorr = signal.correlate(onset, onset, mode="full")[onset.size - 1 :]
+    autocorr[:2] = 0.0
+    hop_seconds = hop / float(sample_rate)
+    min_bpm, max_bpm = 60.0, 200.0
+    min_lag = max(1, int((60.0 / max_bpm) / hop_seconds))
+    max_lag = min(autocorr.size - 1, int((60.0 / min_bpm) / hop_seconds))
+    if max_lag <= min_lag:
+        return 120.0
+
+    lag = min_lag + int(np.argmax(autocorr[min_lag : max_lag + 1]))
+    bpm = 60.0 / (lag * hop_seconds)
+    if bpm < 80.0:
+        bpm *= 2.0
+    elif bpm > 180.0:
+        bpm /= 2.0
+    return float(round(np.clip(bpm, 40.0, 220.0), 3))
+
+
+def track_bass_pitch(
+    mono_audio: np.ndarray,
+    sample_rate: int,
+    options: ScoreOptions | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    options = options or ScoreOptions()
+    filtered = _band_limit(mono_audio, sample_rate, options.min_frequency, options.max_frequency * 1.35)
+    frame = max(512, int(sample_rate * 0.090))
+    hop = max(128, int(sample_rate * 0.025))
+    if filtered.size < frame:
+        filtered = np.pad(filtered, (0, frame - filtered.size))
+
+    frame_count = 1 + max(0, (filtered.size - frame) // hop)
+    midi_values = np.full(frame_count, -1, dtype=np.int16)
+    times = np.empty(frame_count, dtype=np.float32)
+    energies = np.empty(frame_count, dtype=np.float32)
+
+    rms_values = []
+    for index in range(frame_count):
+        start = index * hop
+        chunk = filtered[start : start + frame]
+        rms_values.append(math.sqrt(float(np.mean(np.square(chunk))) + 1e-12))
+    rms_array = np.asarray(rms_values, dtype=np.float32)
+    energy_threshold = max(float(np.percentile(rms_array, 25)) * 0.45, float(np.max(rms_array)) * 0.02)
+
+    for index in range(frame_count):
+        start = index * hop
+        chunk = filtered[start : start + frame].astype(np.float32, copy=True)
+        times[index] = (start + frame / 2.0) / float(sample_rate)
+        energies[index] = rms_array[index]
+        if rms_array[index] < energy_threshold:
+            continue
+        frequency, confidence = _estimate_frame_frequency(chunk, sample_rate, options.min_frequency, options.max_frequency)
+        if frequency is None or confidence < 0.22:
+            continue
+        midi_values[index] = int(round(_frequency_to_midi(frequency)))
+
+    midi_values = _smooth_midi_track(midi_values)
+    return midi_values, times, energies
+
+
+def frame_pitches_to_events(
+    frame_pitches: np.ndarray,
+    frame_times: np.ndarray,
+    frame_energies: np.ndarray,
+    bpm: float,
+    options: ScoreOptions | None = None,
+) -> list[NoteEvent]:
+    options = options or ScoreOptions()
+    if frame_pitches.size == 0:
+        return [NoteEvent(None, 0, options.beats_per_measure * options.divisions_per_quarter)]
+
+    quarter_seconds = 60.0 / bpm
+    divisions_per_second = options.divisions_per_quarter / quarter_seconds
+    frame_step = float(np.median(np.diff(frame_times))) if frame_times.size > 1 else 0.025
+    start_offset = max(0.0, frame_times[0] - frame_step / 2.0)
+    min_duration = max(1, int(round(options.minimum_note_ms / 1000.0 * divisions_per_second)))
+
+    raw_events: list[NoteEvent] = []
+    current = int(frame_pitches[0])
+    start_time = start_offset
+    for index in range(1, frame_pitches.size):
+        pitch = int(frame_pitches[index])
+        if pitch == current:
+            continue
+        end_time = max(start_time + frame_step, frame_times[index] - frame_step / 2.0)
+        raw_events.append(_event_from_times(current, start_time, end_time, divisions_per_second))
+        current = pitch
+        start_time = end_time
+    final_end = frame_times[-1] + frame_step / 2.0
+    raw_events.append(_event_from_times(current, start_time, final_end, divisions_per_second))
+
+    merged = _merge_short_events(raw_events, min_duration)
+    if not merged:
+        return [NoteEvent(None, 0, options.beats_per_measure * options.divisions_per_quarter)]
+    return _normalize_event_timeline(merged)
+
+
+def estimate_key(
+    mono_audio: np.ndarray,
+    sample_rate: int,
+    options: ScoreOptions | None = None,
+) -> tuple[str, int, str]:
+    options = options or ScoreOptions()
+    frame_pitches, _, frame_energies = track_bass_pitch(mono_audio, sample_rate, options)
+    histogram = np.zeros(12, dtype=np.float32)
+    for midi, energy in zip(frame_pitches, frame_energies):
+        if midi >= 0:
+            histogram[int(midi) % 12] += max(float(energy), 1e-6)
+    if not np.any(histogram > 0):
+        return "C major", 0, "major"
+
+    histogram = histogram / np.sum(histogram)
+    best_score = -float("inf")
+    best_tonic = 0
+    best_mode = "major"
+    for tonic in range(12):
+        major_score = float(np.dot(histogram, np.roll(MAJOR_PROFILE, tonic)))
+        minor_score = float(np.dot(histogram, np.roll(MINOR_PROFILE, tonic)))
+        if major_score > best_score:
+            best_score = major_score
+            best_tonic = tonic
+            best_mode = "major"
+        if minor_score > best_score:
+            best_score = minor_score
+            best_tonic = tonic
+            best_mode = "minor"
+
+    tonic_name = _key_name_for_pc(best_tonic)
+    key_label = f"{tonic_name} {best_mode}"
+    return key_label, KEY_FIFTHS.get(tonic_name, 0), best_mode
+
+
+def infer_chords(
+    note_events: list[NoteEvent],
+    key_name: str,
+    mode: str,
+    options: ScoreOptions | None = None,
+) -> list[ChordEvent]:
+    options = options or ScoreOptions()
+    measure_length = options.beats_per_measure * options.divisions_per_quarter
+    measure_count = _measure_count(note_events, options)
+    tonic_pc = _key_label_to_pc(key_name)
+    qualities = MINOR_QUALITIES if mode == "minor" else MAJOR_QUALITIES
+    chords: list[ChordEvent] = []
+
+    for measure_index in range(measure_count):
+        start = measure_index * measure_length
+        end = start + measure_length
+        pitch_weights: dict[int, int] = {}
+        for event in note_events:
+            if event.midi is None:
+                continue
+            overlap = _overlap(start, end, event.start_division, event.start_division + event.duration_divisions)
+            if overlap > 0:
+                pitch_weights[event.midi] = pitch_weights.get(event.midi, 0) + overlap
+        if not pitch_weights:
+            continue
+        bass_midi = max(pitch_weights.items(), key=lambda item: (item[1], -item[0]))[0]
+        root_pc = bass_midi % 12
+        degree = (root_pc - tonic_pc) % 12
+        quality = qualities.get(degree, "major")
+        chords.append(
+            ChordEvent(
+                measure=measure_index + 1,
+                root=NOTE_NAMES_SHARP[root_pc],
+                quality=quality,
+                bass_midi=bass_midi,
+            )
+        )
+    return chords
+
+
+def write_musicxml(
+    output_path: Path,
+    note_events: list[NoteEvent],
+    chords: list[ChordEvent],
+    bpm: float,
+    key_name: str,
+    key_fifths: int,
+    mode: str,
+    options: ScoreOptions,
+) -> None:
+    score = ET.Element("score-partwise", version="3.1")
+    work = ET.SubElement(score, "work")
+    ET.SubElement(work, "work-title").text = options.title or output_path.stem
+
+    part_list = ET.SubElement(score, "part-list")
+    score_part = ET.SubElement(part_list, "score-part", id="P1")
+    ET.SubElement(score_part, "part-name").text = "Bass"
+
+    part = ET.SubElement(score, "part", id="P1")
+    measure_length = options.beats_per_measure * options.divisions_per_quarter
+    measure_count = _measure_count(note_events, options)
+    chord_by_measure = {chord.measure: chord for chord in chords}
+    pieces = _events_to_measure_pieces(note_events, options)
+
+    for measure_number in range(1, measure_count + 1):
+        measure = ET.SubElement(part, "measure", number=str(measure_number))
+        if measure_number == 1:
+            attributes = ET.SubElement(measure, "attributes")
+            ET.SubElement(attributes, "divisions").text = str(options.divisions_per_quarter)
+            key = ET.SubElement(attributes, "key")
+            ET.SubElement(key, "fifths").text = str(key_fifths)
+            ET.SubElement(key, "mode").text = mode
+            time = ET.SubElement(attributes, "time")
+            ET.SubElement(time, "beats").text = str(options.beats_per_measure)
+            ET.SubElement(time, "beat-type").text = str(options.beat_unit)
+            clef = ET.SubElement(attributes, "clef")
+            ET.SubElement(clef, "sign").text = "F"
+            ET.SubElement(clef, "line").text = "4"
+
+            direction = ET.SubElement(measure, "direction", placement="above")
+            direction_type = ET.SubElement(direction, "direction-type")
+            metronome = ET.SubElement(direction_type, "metronome")
+            ET.SubElement(metronome, "beat-unit").text = "quarter"
+            ET.SubElement(metronome, "per-minute").text = str(int(round(bpm)))
+            ET.SubElement(direction, "sound", tempo=str(round(bpm, 3)))
+
+        chord = chord_by_measure.get(measure_number)
+        if chord is not None:
+            _add_harmony(measure, chord)
+
+        for piece in pieces.get(measure_number, []):
+            _add_note(measure, piece)
+
+        if measure_number not in pieces:
+            _add_note(measure, NotePiece(None, measure_length, False, False))
+
+    ET.indent(score, space="  ")
+    ET.ElementTree(score).write(output_path, encoding="utf-8", xml_declaration=True)
+
+
+@dataclass(frozen=True)
+class NotePiece:
+    midi: int | None
+    duration: int
+    tie_start: bool
+    tie_stop: bool
+
+
+def _events_to_measure_pieces(note_events: list[NoteEvent], options: ScoreOptions) -> dict[int, list[NotePiece]]:
+    measure_length = options.beats_per_measure * options.divisions_per_quarter
+    by_measure: dict[int, list[NotePiece]] = {}
+    for event in note_events:
+        remaining = event.duration_divisions
+        cursor = event.start_division
+        components: list[tuple[int, int]] = []
+        while remaining > 0:
+            measure_number = cursor // measure_length + 1
+            measure_remaining = measure_length - (cursor % measure_length)
+            chunk = min(remaining, measure_remaining)
+            for duration in _duration_components(chunk):
+                components.append((measure_number, duration))
+                cursor += duration
+                remaining -= duration
+
+        for index, (measure_number, duration) in enumerate(components):
+            piece = NotePiece(
+                midi=event.midi,
+                duration=duration,
+                tie_start=event.midi is not None and index < len(components) - 1,
+                tie_stop=event.midi is not None and index > 0,
+            )
+            by_measure.setdefault(measure_number, []).append(piece)
+    return by_measure
+
+
+def _add_harmony(measure: ET.Element, chord: ChordEvent) -> None:
+    harmony = ET.SubElement(measure, "harmony")
+    root = ET.SubElement(harmony, "root")
+    step, alter = _split_note_name(chord.root)
+    ET.SubElement(root, "root-step").text = step
+    if alter:
+        ET.SubElement(root, "root-alter").text = str(alter)
+    ET.SubElement(harmony, "kind", text=chord.symbol).text = chord.quality
+
+
+def _add_note(measure: ET.Element, piece: NotePiece) -> None:
+    note = ET.SubElement(measure, "note")
+    if piece.midi is None:
+        ET.SubElement(note, "rest")
+    else:
+        pitch = ET.SubElement(note, "pitch")
+        step, alter, octave = _midi_to_pitch(piece.midi)
+        ET.SubElement(pitch, "step").text = step
+        if alter:
+            ET.SubElement(pitch, "alter").text = str(alter)
+        ET.SubElement(pitch, "octave").text = str(octave)
+        if piece.tie_start:
+            ET.SubElement(note, "tie", type="start")
+        if piece.tie_stop:
+            ET.SubElement(note, "tie", type="stop")
+    ET.SubElement(note, "duration").text = str(piece.duration)
+    ET.SubElement(note, "voice").text = "1"
+    note_type, dots = _duration_type(piece.duration)
+    ET.SubElement(note, "type").text = note_type
+    for _ in range(dots):
+        ET.SubElement(note, "dot")
+    if piece.midi is not None and (piece.tie_start or piece.tie_stop):
+        notations = ET.SubElement(note, "notations")
+        if piece.tie_stop:
+            ET.SubElement(notations, "tied", type="stop")
+        if piece.tie_start:
+            ET.SubElement(notations, "tied", type="start")
+
+
+def _read_audio(path: Path) -> tuple[int, np.ndarray]:
+    if path.suffix.lower() == ".wav":
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", WavFileWarning)
+            sample_rate, raw = wavfile.read(path)
+        audio = _to_float_audio(np.asarray(raw))
+    else:
+        try:
+            import soundfile as sf
+        except Exception as exc:  # pragma: no cover - optional path
+            raise RuntimeError(f"{path.suffix} score input requires soundfile support.") from exc
+        audio, sample_rate = sf.read(path, always_2d=False, dtype="float32")
+    if audio.ndim == 1:
+        audio = audio[:, None]
+    return int(sample_rate), audio.astype(np.float32, copy=False)
+
+
+def _to_float_audio(data: np.ndarray) -> np.ndarray:
+    if np.issubdtype(data.dtype, np.floating):
+        return data.astype(np.float32, copy=False)
+    if np.issubdtype(data.dtype, np.signedinteger):
+        scale = float(max(abs(np.iinfo(data.dtype).min), np.iinfo(data.dtype).max))
+        return data.astype(np.float32) / scale
+    if np.issubdtype(data.dtype, np.unsignedinteger):
+        info = np.iinfo(data.dtype)
+        midpoint = (info.max + info.min) / 2.0
+        return (data.astype(np.float32) - midpoint) / midpoint
+    return data.astype(np.float32)
+
+
+def _to_mono(audio: np.ndarray) -> np.ndarray:
+    if audio.ndim == 1:
+        return audio.astype(np.float32, copy=False)
+    return audio.mean(axis=1).astype(np.float32, copy=False)
+
+
+def _band_limit(audio: np.ndarray, sample_rate: int, low: float, high: float) -> np.ndarray:
+    nyquist = sample_rate / 2.0
+    high = min(high, nyquist * 0.95)
+    low = max(1.0, min(low, high * 0.8))
+    sos = signal.butter(4, [low / nyquist, high / nyquist], btype="bandpass", output="sos")
+    return signal.sosfiltfilt(sos, audio).astype(np.float32)
+
+
+def _frame_rms(audio: np.ndarray, frame: int, hop: int) -> np.ndarray:
+    if audio.size < frame:
+        padded = np.pad(audio, (0, frame - audio.size))
+    else:
+        pad = (hop - ((audio.size - frame) % hop)) % hop
+        padded = np.pad(audio, (0, pad))
+    frame_count = 1 + max(0, (padded.size - frame) // hop)
+    values = np.empty(frame_count, dtype=np.float32)
+    for index in range(frame_count):
+        chunk = padded[index * hop : index * hop + frame]
+        values[index] = math.sqrt(float(np.mean(np.square(chunk))) + 1e-12)
+    return values
+
+
+def _estimate_frame_frequency(
+    chunk: np.ndarray,
+    sample_rate: int,
+    min_frequency: float,
+    max_frequency: float,
+) -> tuple[float | None, float]:
+    chunk = chunk - float(np.mean(chunk))
+    if not np.any(np.abs(chunk) > 1e-7):
+        return None, 0.0
+    chunk = chunk * np.hanning(chunk.size)
+    autocorr = signal.correlate(chunk, chunk, mode="full")[chunk.size - 1 :]
+    autocorr[0] = max(float(autocorr[0]), 1e-12)
+    min_lag = max(1, int(sample_rate / max_frequency))
+    max_lag = min(autocorr.size - 1, int(sample_rate / min_frequency))
+    if max_lag <= min_lag:
+        return None, 0.0
+    search = autocorr[min_lag : max_lag + 1]
+    lag = min_lag + int(np.argmax(search))
+    confidence = float(autocorr[lag] / autocorr[0])
+    return sample_rate / float(lag), confidence
+
+
+def _smooth_midi_track(midi_values: np.ndarray) -> np.ndarray:
+    smoothed = midi_values.copy()
+    for index in range(1, midi_values.size - 1):
+        neighborhood = midi_values[index - 1 : index + 2]
+        valid = neighborhood[neighborhood >= 0]
+        if valid.size >= 2:
+            smoothed[index] = int(np.median(valid))
+    return smoothed
+
+
+def _frequency_to_midi(frequency: float) -> float:
+    return 69.0 + 12.0 * math.log2(frequency / 440.0)
+
+
+def _event_from_times(
+    midi: int,
+    start_time: float,
+    end_time: float,
+    divisions_per_second: float,
+) -> NoteEvent:
+    start_division = max(0, int(round(start_time * divisions_per_second)))
+    end_division = max(start_division + 1, int(round(end_time * divisions_per_second)))
+    return NoteEvent(None if midi < 0 else midi, start_division, end_division - start_division)
+
+
+def _merge_short_events(events: list[NoteEvent], min_duration: int) -> list[NoteEvent]:
+    merged: list[NoteEvent] = []
+    for event in events:
+        if event.duration_divisions >= min_duration or not merged:
+            merged.append(event)
+            continue
+        previous = merged[-1]
+        merged[-1] = NoteEvent(previous.midi, previous.start_division, previous.duration_divisions + event.duration_divisions)
+    return merged
+
+
+def _normalize_event_timeline(events: list[NoteEvent]) -> list[NoteEvent]:
+    normalized: list[NoteEvent] = []
+    cursor = 0
+    for event in events:
+        if event.start_division > cursor:
+            normalized.append(NoteEvent(None, cursor, event.start_division - cursor))
+            cursor = event.start_division
+        normalized.append(NoteEvent(event.midi, cursor, max(1, event.duration_divisions)))
+        cursor += max(1, event.duration_divisions)
+    return normalized
+
+
+def _measure_count(note_events: list[NoteEvent], options: ScoreOptions) -> int:
+    measure_length = options.beats_per_measure * options.divisions_per_quarter
+    if not note_events:
+        return 1
+    end = max(event.start_division + event.duration_divisions for event in note_events)
+    return max(1, int(math.ceil(end / measure_length)))
+
+
+def _duration_components(duration: int) -> list[int]:
+    allowed = (16, 12, 8, 6, 4, 3, 2, 1)
+    parts: list[int] = []
+    remaining = duration
+    while remaining > 0:
+        for value in allowed:
+            if value <= remaining:
+                parts.append(value)
+                remaining -= value
+                break
+    return parts
+
+
+def _duration_type(duration: int) -> tuple[str, int]:
+    mapping = {
+        16: ("whole", 0),
+        12: ("half", 1),
+        8: ("half", 0),
+        6: ("quarter", 1),
+        4: ("quarter", 0),
+        3: ("eighth", 1),
+        2: ("eighth", 0),
+        1: ("16th", 0),
+    }
+    return mapping.get(duration, ("quarter", 0))
+
+
+def _overlap(start_a: int, end_a: int, start_b: int, end_b: int) -> int:
+    return max(0, min(end_a, end_b) - max(start_a, start_b))
+
+
+def _midi_to_pitch(midi: int) -> tuple[str, int, int]:
+    pitch_class = midi % 12
+    octave = midi // 12 - 1
+    name = NOTE_NAMES_SHARP[pitch_class]
+    step, alter = _split_note_name(name)
+    return step, alter, octave
+
+
+def _split_note_name(name: str) -> tuple[str, int]:
+    if len(name) == 1:
+        return name, 0
+    if name[1] == "#":
+        return name[0], 1
+    if name[1] == "b":
+        return name[0], -1
+    return name[0], 0
+
+
+def _key_name_for_pc(pc: int) -> str:
+    sharp_name = NOTE_NAMES_SHARP[pc]
+    if sharp_name in KEY_FIFTHS and abs(KEY_FIFTHS[sharp_name]) <= 4:
+        return sharp_name
+    return PC_TO_FLAT_NAME[pc]
+
+
+def _key_label_to_pc(key_name: str) -> int:
+    tonic = key_name.split()[0]
+    lookup = {name: index for index, name in enumerate(NOTE_NAMES_SHARP)}
+    lookup.update({name: index for index, name in enumerate(PC_TO_FLAT_NAME)})
+    return lookup.get(tonic, 0)
+
+
+def _parse_key_override(value: str) -> tuple[str, int, str]:
+    parts = value.strip().replace("-", " ").split()
+    if not parts:
+        return "C major", 0, "major"
+    tonic = parts[0]
+    mode = parts[1].lower() if len(parts) > 1 else "major"
+    if mode not in {"major", "minor"}:
+        mode = "major"
+    return f"{tonic} {mode}", KEY_FIFTHS.get(tonic, 0), mode
+
+
+def _validate_options(options: ScoreOptions) -> None:
+    if options.divisions_per_quarter < 1:
+        raise ValueError("divisions_per_quarter must be positive")
+    if options.beats_per_measure < 1:
+        raise ValueError("beats_per_measure must be positive")
+    if options.min_frequency <= 0 or options.max_frequency <= options.min_frequency:
+        raise ValueError("score frequency range is invalid")
